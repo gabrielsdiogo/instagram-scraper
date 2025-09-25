@@ -1,0 +1,26 @@
+# Byte-compiled / cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtualenv
+.env
+.venv
+env/
+venv/
+
+# IDE configs
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Local configs
+seen_profiles.json
+profiles_data.json
+
+# System files
+.DS_Store
+Thumbs.db

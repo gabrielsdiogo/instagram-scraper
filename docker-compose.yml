@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  instagram-scraper:
+    build: .
+    container_name: instagram-scraper
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./seen_profiles.json:/app/seen_profiles.json
