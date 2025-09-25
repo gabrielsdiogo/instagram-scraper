@@ -278,7 +278,8 @@ def scrape_instagram(request: ScrapeRequest):
     cookies = request.cookies
     max_profiles = request.max_profiles
 
-    seen = load_seen_profiles()
+    # 🔹 sempre carregar como SET para evitar duplicados
+    seen = set(load_seen_profiles())
 
     driver = setup_driver(cookies)
     username = get_username(driver)
@@ -294,10 +295,12 @@ def scrape_instagram(request: ScrapeRequest):
             data = get_profile_data(driver, author_info["username"])
             data["profile_url"] = author_info["profile_url"]
             profiles.append(data)
-            seen.add(author_info["username"])
+            seen.add(author_info["username"])  # 🔹 agora funciona sem erro
         time.sleep(1)
 
     driver.quit()
 
-    save_seen_profiles(seen)
+    # 🔹 salvar convertendo de volta para lista
+    save_seen_profiles(list(seen))
+
     return {"profiles": profiles}
