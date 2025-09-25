@@ -21,7 +21,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 # =======================
 # CONFIGURAÇÕES GERAIS
 # =======================
-SEEN_FILE = "seen_profiles.json"
+DATA_DIR = "data"
+SEEN_FILE = os.path.join(DATA_DIR, "seen_profiles.json")
 
 tags_metadata = [
     {
@@ -76,15 +77,24 @@ class ScrapeRequest(BaseModel):
 # =======================
 # FUNÇÕES AUXILIARES
 # =======================
-def load_seen_profiles() -> set:
-    if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    return set()
 
-def save_seen_profiles(seen: set):
+
+def load_seen_profiles():
+    # cria a pasta se não existir
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    # cria o arquivo se não existir
+    if not os.path.isfile(SEEN_FILE):
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f)
+
+    with open(SEEN_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_seen_profiles(profiles):
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(seen), f, ensure_ascii=False, indent=4)
+        json.dump(profiles, f, ensure_ascii=False, indent=4)
 
 def setup_driver(cookies: Cookies):
     chrome_options = Options()
