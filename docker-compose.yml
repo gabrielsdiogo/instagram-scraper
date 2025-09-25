@@ -1,11 +1,12 @@
-version: "3.9"
-
 services:
   instagram-scraper:
     build: .
     container_name: instagram-scraper
     restart: unless-stopped
     ports:
-      - "59123:8000"   # Porta externa 59123 -> interna 8000
+      - "59123:8000"
     volumes:
       - ./seen_profiles.json:/app/seen_profiles.json
+    command: >
+      sh -c "test -f /app/seen_profiles.json || echo '[]' > /app/seen_profiles.json;
+             uvicorn app:app --host 0.0.0.0 --port 8000"
