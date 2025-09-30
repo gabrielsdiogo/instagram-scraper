@@ -126,7 +126,7 @@ def get_username(driver):
     href = elem.get_attribute("href")
     return href.strip("/").split("/")[-1]
 
-def scrape_saved_posts(driver, username, max_scrolls=50):
+def scrape_saved_posts(driver, username, max_needed, max_scrolls=2000):
     SCROLL_PAUSE = 3
     saved_url = f"https://www.instagram.com/{username}/saved/all-posts/"
     driver.get(saved_url)
@@ -134,26 +134,27 @@ def scrape_saved_posts(driver, username, max_scrolls=50):
 
     last_height = driver.execute_script("return document.body.scrollHeight")
     scrolls = 0
+    posts = set()  # evitar duplicados
 
-    while scrolls < max_scrolls:
+    while scrolls < max_scrolls and len(posts) < max_needed:
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(SCROLL_PAUSE)
+
         new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
+        if new_height == last_height:  # fim da página
             break
         last_height = new_height
         scrolls += 1
 
-    html = driver.page_source
-    soup = BeautifulSoup(html, "html.parser")
+        # extrair posts a cada scroll
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if href.startswith("/p/") or href.startswith("/reel/") or href.startswith("/tv/"):
+                posts.add("https://www.instagram.com" + href)
 
-    posts = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.startswith("/p/") or href.startswith("/reel/") or href.startswith("/tv/"):
-            posts.append("https://www.instagram.com" + href)
-
-    return posts
+    return list(posts)
 
 def get_post_author(driver, post_url):
     driver.get(post_url)
@@ -252,38 +253,16 @@ def get_profile_data(driver, username):
 # =======================
 @app.post("/scrape", tags=["Scraping"])
 def scrape_instagram(request: ScrapeRequest):
-    """
-    ### Coleta perfis a partir dos posts salvos
-
-    - **cookies**: objeto com `sessionid`, `ds_user_id` e `csrftoken`
-    - **max_profiles**: número máximo de perfis inéditos a coletar nesta chamada
-
-    Retorna JSON com lista de perfis:
-    ```json
-    {
-      "profiles": [
-        {
-          "username": "empresa",
-          "profile_url": "https://www.instagram.com/empresa/",
-          "full_name": "Empresa LTDA",
-          "biography": "Descrição do perfil",
-          "external_url": "https://empresa.com.br",
-          "address": "São Paulo, Brasil",
-          "business_category": "Serviços"
-        }
-      ]
-    }
-    ```
-    """
     cookies = request.cookies
     max_profiles = request.max_profiles
 
-    # 🔹 sempre carregar como SET para evitar duplicados
     seen = set(load_seen_profiles())
 
     driver = setup_driver(cookies)
     username = get_username(driver)
-    posts = scrape_saved_posts(driver, username)
+
+    posts = scrape_saved_posts(driver, username, max_profiles * 3)  
+    # 🔹 busca mais posts do que o necessário para aumentar a chance de atingir o limite
 
     profiles = []
     for post in posts:
@@ -295,12 +274,10 @@ def scrape_instagram(request: ScrapeRequest):
             data = get_profile_data(driver, author_info["username"])
             data["profile_url"] = author_info["profile_url"]
             profiles.append(data)
-            seen.add(author_info["username"])  # 🔹 agora funciona sem erro
+            seen.add(author_info["username"])
         time.sleep(1)
 
     driver.quit()
-
-    # 🔹 salvar convertendo de volta para lista
     save_seen_profiles(list(seen))
 
     return {"profiles": profiles}
