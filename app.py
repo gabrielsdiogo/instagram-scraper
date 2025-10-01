@@ -8,7 +8,7 @@ from urllib.parse import unquote
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
-
+from selenium.webdriver import ActionChains
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -96,13 +96,27 @@ def save_seen_profiles(profiles):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(profiles, f, ensure_ascii=False, indent=4)
 
-def setup_driver(cookies: Cookies):
+def setup_driver(cookies):
     chrome_options = Options()
+
+    # Headless (pode remover se quiser ver o navegador abrindo)
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--window-size=1920,1080")
+
+    # User-Agent realista
+    chrome_options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    )
+
+    # Evitar bloqueios comuns
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+
+    # Profile persistente para cookies/cache
+    chrome_options.add_argument("--user-data-dir=/tmp/chrome-profile")
 
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -110,6 +124,7 @@ def setup_driver(cookies: Cookies):
     driver.get("https://www.instagram.com/")
     time.sleep(3)
 
+    # Inserir cookies
     for k, v in cookies.dict().items():
         driver.add_cookie({"name": k, "value": v, "domain": ".instagram.com"})
 
@@ -126,35 +141,141 @@ def get_username(driver):
     href = elem.get_attribute("href")
     return href.strip("/").split("/")[-1]
 
-def scrape_saved_posts(driver, username, max_needed, max_scrolls=2000):
-    SCROLL_PAUSE = 3
+
+
+
+# def scrape_saved_posts(driver, username, max_profiles=10, max_scrolls=30):
+#     """
+#     Abre os posts salvos, coleta perfis diretamente do modal do post.
+#     Retorna até max_profiles perfis únicos.
+#     """
+#     SCROLL_PAUSE = 2
+#     saved_url = f"https://www.instagram.com/{username}/saved/all-posts/"
+#     driver.get(saved_url)
+#     time.sleep(5)
+
+#     profiles = []
+#     seen = set()
+#     scrolls = 0
+
+#     while len(profiles) < max_profiles and scrolls < max_scrolls:
+#         post_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/p/'], a[href*='/reel/']")
+
+#         for i in range(len(post_elements)):
+#             if len(profiles) >= max_profiles:
+#                 break
+
+#             try:
+#                 post_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/p/'], a[href*='/reel/']")
+#                 post = post_elements[i]
+
+#                 driver.execute_script("arguments[0].scrollIntoView(true);", post)
+#                 time.sleep(1)
+#                 post.click()
+#                 time.sleep(3)
+
+#                 author_elem = WebDriverWait(driver, 6).until(
+#                     EC.presence_of_element_located((By.CSS_SELECTOR, "article header a"))
+#                 )
+#                 profile_url = author_elem.get_attribute("href")
+#                 username_author = profile_url.strip("/").split("/")[-1]
+
+#                 if username_author not in seen:
+#                     profiles.append({"username": username_author, "profile_url": profile_url})
+#                     seen.add(username_author)
+#                     print(f"[+] Extraído perfil: {username_author}")
+
+#                 # fechar modal
+#                 try:
+#                     close_btn = WebDriverWait(driver, 5).until(
+#                         EC.element_to_be_clickable((By.XPATH, "/html/body/div[last()]/div[1]/div/div[2]/div"))
+#                     )
+#                     close_btn.click()
+#                     time.sleep(2)
+#                 except:
+#                     from selenium.webdriver.common.keys import Keys
+#                     webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+#                     time.sleep(2)
+
+#             except Exception as e:
+#                 print(f"[!] Erro ao abrir post {i}: {e}")
+#                 continue
+
+#         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+#         time.sleep(SCROLL_PAUSE)
+#         scrolls += 1
+
+#     return profiles
+
+def scrape_saved_posts(driver, username, max_profiles=10, max_scrolls=50):
+    """
+    Percorre os posts salvos, clicando em cada um e extraindo username/profile_url.
+    Só retorna perfis que ainda não estavam no arquivo de 'seen_profiles.json'.
+    Continua rolando até atingir max_profiles ou acabar os posts.
+    """
+    SCROLL_PAUSE = 2
     saved_url = f"https://www.instagram.com/{username}/saved/all-posts/"
     driver.get(saved_url)
     time.sleep(5)
 
-    last_height = driver.execute_script("return document.body.scrollHeight")
+    seen_global = set(load_seen_profiles())  # já salvos no arquivo
+    collected = []  # novos perfis nesta chamada
+    seen_local = set()  # evita duplicar no mesmo request
     scrolls = 0
-    posts = set()  # evitar duplicados
 
-    while scrolls < max_scrolls and len(posts) < max_needed:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(SCROLL_PAUSE)
+    while len(collected) < max_profiles and scrolls < max_scrolls:
+        post_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/p/'], a[href*='/reel/']")
 
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:  # fim da página
-            break
-        last_height = new_height
-        scrolls += 1
+        for i in range(len(post_elements)):
+            if len(collected) >= max_profiles:
+                break
 
-        # extrair posts a cada scroll
-        html = driver.page_source
-        soup = BeautifulSoup(html, "html.parser")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if href.startswith("/p/") or href.startswith("/reel/") or href.startswith("/tv/"):
-                posts.add("https://www.instagram.com" + href)
+            try:
+                post = post_elements[i]
+                driver.execute_script("arguments[0].scrollIntoView(true);", post)
+                time.sleep(1)
+                post.click()
+                time.sleep(2.5)
 
-    return list(posts)
+                # pega perfil do autor no modal
+                author_elem = WebDriverWait(driver, 6).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "article header a"))
+                )
+                profile_url = author_elem.get_attribute("href")
+                username_author = profile_url.strip("/").split("/")[-1]
+
+                # 🔹 só adiciona se não estiver nem no arquivo nem nos coletados desta request
+                if username_author not in seen_global and username_author not in seen_local:
+                    collected.append({"username": username_author, "profile_url": profile_url})
+                    seen_local.add(username_author)
+                    print(f"[+] Novo perfil encontrado: {username_author}")
+
+                # fechar modal
+                try:
+                    close_btn = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, "/html/body/div[last()]/div[1]/div/div[2]/div"))
+                    )
+                    close_btn.click()
+                    time.sleep(1.5)
+                except:
+                    from selenium.webdriver.common.keys import Keys
+                    webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                    time.sleep(1.5)
+
+            except Exception as e:
+                print(f"[!] Erro no post {i}: {e}")
+                continue
+
+        # rolar mais se ainda não atingimos o limite
+        if len(collected) < max_profiles:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(SCROLL_PAUSE)
+            scrolls += 1
+
+    return collected
+
+
+
 
 def get_post_author(driver, post_url):
     driver.get(post_url)
@@ -186,7 +307,7 @@ def get_post_author(driver, post_url):
     except Exception as e:
         print(f"[!] Erro ao capturar autor em {post_url}: {e}")
         return None
-
+    
 def get_profile_data(driver, username):
     url = f"https://www.instagram.com/{username}/"
     driver.get(url)
@@ -256,28 +377,30 @@ def scrape_instagram(request: ScrapeRequest):
     cookies = request.cookies
     max_profiles = request.max_profiles
 
-    seen = set(load_seen_profiles())
+    try:
+        driver = setup_driver(cookies)
+        username = get_username(driver)
 
-    driver = setup_driver(cookies)
-    username = get_username(driver)
+        # coleta apenas perfis inéditos
+        new_profiles = scrape_saved_posts(driver, username, max_profiles=max_profiles)
 
-    posts = scrape_saved_posts(driver, username, max_profiles * 3)  
-    # 🔹 busca mais posts do que o necessário para aumentar a chance de atingir o limite
-
-    profiles = []
-    for post in posts:
-        if len(profiles) >= max_profiles:
-            break
-
-        author_info = get_post_author(driver, post)
-        if author_info and author_info["username"] not in seen:
-            data = get_profile_data(driver, author_info["username"])
-            data["profile_url"] = author_info["profile_url"]
+        profiles = []
+        for profile in new_profiles:
+            data = get_profile_data(driver, profile["username"])
+            data["profile_url"] = profile["profile_url"]
             profiles.append(data)
-            seen.add(author_info["username"])
-        time.sleep(1)
 
-    driver.quit()
-    save_seen_profiles(list(seen))
+        driver.quit()
 
-    return {"profiles": profiles}
+        # 🔹 salvar os novos perfis no arquivo global
+        seen = set(load_seen_profiles())
+        seen.update([p["username"] for p in new_profiles])
+        save_seen_profiles(list(seen))
+
+        return {"profiles": profiles}
+
+    except Exception as e:
+        import traceback
+        error_msg = traceback.format_exc()
+        print(f"[❌ ERRO API /scrape] {e}\n{error_msg}")
+        return {"error": str(e), "trace": error_msg}
