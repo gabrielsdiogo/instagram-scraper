@@ -5,7 +5,7 @@ import time
 import json
 import os
 from urllib.parse import unquote
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from selenium.webdriver import ActionChains
@@ -100,8 +100,8 @@ def save_seen_profiles(profiles):
 
 def setup_driver(cookies: Cookies):
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--window-size=1920,1080")
+    # chrome_options.add_argument("--headless=new")
+    # chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -147,72 +147,101 @@ def get_username(driver):
 
 
 
-def scrape_saved_posts(driver, username, max_profiles=10, max_scrolls=50):
+def close_post_modal(driver):
+    """Fecha o modal do post com segurança"""
+    try:
+        # Primeiro tenta pelo botão padrão
+        close_button = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, "/html/body/div[5]/div[1]/div/div[2]/div"))
+        )
+        driver.execute_script("arguments[0].click();", close_button)
+        time.sleep(2)
+        return True
+    except:
+        try:
+            # Se não conseguir, usa tecla ESC como fallback
+            from selenium.webdriver.common.keys import Keys
+            from selenium.webdriver.common.action_chains import ActionChains
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(2)
+            return True
+        except Exception as e:
+            print(f"[!] Erro ao fechar modal: {e}")
+            return False
+
+
+def scrape_saved_posts(driver, username, max_profiles=10, scroll_limit=50):
     """
-    Percorre os posts salvos, clicando em cada um e extraindo username/profile_url.
-    Só retorna perfis que ainda não estavam no arquivo de 'seen_profiles.json'.
-    Continua rolando até atingir max_profiles ou acabar os posts.
+    1. Coleta apenas os usernames inéditos dos posts salvos (rolando até atingir max_profiles).
+    2. Depois, abre cada perfil coletado e extrai os dados.
     """
-    SCROLL_PAUSE = 2
+    SCROLL_PAUSE = 3
     saved_url = f"https://www.instagram.com/{username}/saved/all-posts/"
     driver.get(saved_url)
     time.sleep(5)
 
-    seen_global = set(load_seen_profiles())  # já salvos no arquivo
-    collected = []  # novos perfis nesta chamada
-    seen_local = set()  # evita duplicar no mesmo request
+    seen_profiles = set(load_seen_profiles())  # já processados
+    collected_usernames = []
     scrolls = 0
+    last_height = driver.execute_script("return document.body.scrollHeight")
 
-    while len(collected) < max_profiles and scrolls < max_scrolls:
-        post_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/p/'], a[href*='/reel/']")
+    # ====== FASE 1: COLETAR USERNAMES ======
+    while len(collected_usernames) < max_profiles and scrolls < scroll_limit:
+        post_links = driver.find_elements(By.XPATH, '//a[contains(@href, "/p/")]')
+        novos_encontrados = False
 
-        for i in range(len(post_elements)):
-            if len(collected) >= max_profiles:
+        for post in post_links:
+            if len(collected_usernames) >= max_profiles:
                 break
-
             try:
-                post = post_elements[i]
-                driver.execute_script("arguments[0].scrollIntoView(true);", post)
-                time.sleep(1)
-                post.click()
-                time.sleep(2.5)
+                driver.execute_script("arguments[0].click();", post)
+                time.sleep(2)
 
-                # pega perfil do autor no modal
+                # 🔑 Mantém sua lógica original
                 author_elem = WebDriverWait(driver, 6).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "article header a"))
                 )
                 profile_url = author_elem.get_attribute("href")
                 username_author = profile_url.strip("/").split("/")[-1]
 
-                # 🔹 só adiciona se não estiver nem no arquivo nem nos coletados desta request
-                if username_author not in seen_global and username_author not in seen_local:
-                    collected.append({"username": username_author, "profile_url": profile_url})
-                    seen_local.add(username_author)
-                    print(f"[+] Novo perfil encontrado: {username_author}")
+                if username_author not in seen_profiles and username_author not in collected_usernames:
+                    collected_usernames.append(username_author)
+                    seen_profiles.add(username_author)
+                    novos_encontrados = True
+                    print(f"[✓] Novo perfil coletado: {username_author}")
 
-                # fechar modal
-                try:
-                    close_btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.XPATH, "/html/body/div[last()]/div[1]/div/div[2]/div"))
-                    )
-                    close_btn.click()
-                    time.sleep(1.5)
-                except:
-                    from selenium.webdriver.common.keys import Keys
-                    webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-                    time.sleep(1.5)
+                close_post_modal(driver)
 
             except Exception as e:
-                print(f"[!] Erro no post {i}: {e}")
-                continue
+                print(f"[!] Erro no post: {e}")
+                close_post_modal(driver)
 
-        # rolar mais se ainda não atingimos o limite
-        if len(collected) < max_profiles:
+        # rola se não achou nada novo
+        if not novos_encontrados and len(collected_usernames) < max_profiles:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(SCROLL_PAUSE)
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                print("[!] Fim da página, sem mais posts.")
+                break
+            last_height = new_height
+            scrolls += 1
+        else:
             scrolls += 1
 
-    return collected
+    # ====== FASE 2: VISITAR PERFIS ======
+    profiles_data = []
+    for uname in collected_usernames:
+        try:
+            data = get_profile_data(driver, uname)
+            data["profile_url"] = f"https://www.instagram.com/{uname}/"
+            profiles_data.append(data)
+            print(f"[→] Dados extraídos de {uname}")
+        except Exception as e:
+            print(f"[!] Erro ao abrir perfil {uname}: {e}")
+
+    save_seen_profiles(list(seen_profiles))
+    return profiles_data
 
 
 
@@ -322,7 +351,7 @@ def scrape_instagram(request: ScrapeRequest):
         username = get_username(driver)
 
         # coleta apenas perfis inéditos
-        new_profiles = scrape_saved_posts(driver, username, max_profiles=max_profiles)
+        new_profiles = scrape_saved_posts(driver, username, max_profiles)
 
         profiles = []
         for profile in new_profiles:
@@ -340,7 +369,10 @@ def scrape_instagram(request: ScrapeRequest):
         return {"profiles": profiles}
 
     except Exception as e:
-        import traceback
-        error_msg = traceback.format_exc()
-        print(f"[❌ ERRO API /scrape] {e}\n{error_msg}")
-        return {"error": str(e), "trace": error_msg}
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+        # 🔴 retorna erro 500 com a descrição
+        raise HTTPException(status_code=500, detail=f"Erro durante scraping: {str(e)}")
