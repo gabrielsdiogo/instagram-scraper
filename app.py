@@ -82,26 +82,44 @@ class ScrapeRequest(BaseModel):
 
 
 def load_seen_profiles():
-    # cria a pasta se não existir
+    """Carrega o arquivo JSON garantindo que sempre retorna lista de dicionários."""
     os.makedirs(DATA_DIR, exist_ok=True)
-
-    # cria o arquivo se não existir
     if not os.path.isfile(SEEN_FILE):
         with open(SEEN_FILE, "w", encoding="utf-8") as f:
             json.dump([], f)
 
     with open(SEEN_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+
+    # Normaliza caso existam listas antigas no formato [username, post_url]
+    normalized = []
+    for p in data:
+        if isinstance(p, list) and len(p) == 2:
+            normalized.append({"username": p[0], "post_url": p[1]})
+        elif isinstance(p, dict):
+            normalized.append(p)
+
+    return normalized
+
 
 def save_seen_profiles(profiles):
+    """Salva no JSON garantindo que todos os itens sejam dicionários."""
     os.makedirs(DATA_DIR, exist_ok=True)
+
+    normalized = []
+    for p in profiles:
+        if isinstance(p, list) and len(p) == 2:
+            normalized.append({"username": p[0], "post_url": p[1]})
+        elif isinstance(p, dict):
+            normalized.append(p)
+
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(profiles, f, ensure_ascii=False, indent=4)
+        json.dump(normalized, f, ensure_ascii=False, indent=4)
 
 def setup_driver(cookies: Cookies):
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--window-size=1920,1080")
+    # chrome_options.add_argument("--headless=new")
+    # chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -170,45 +188,65 @@ def close_post_modal(driver):
             return False
 
 
+
+
 def scrape_saved_posts(driver, username, max_profiles=10, scroll_limit=50):
     """
-    1. Coleta apenas os usernames inéditos dos posts salvos (rolando até atingir max_profiles).
-    2. Depois, abre cada perfil coletado e extrai os dados.
+    1. Coleta usernames inéditos de posts salvos.
+    2. Sempre salva o post_url aberto no arquivo, mesmo que username já exista.
+    3. Só adiciona username na lista final se for novo.
     """
     SCROLL_PAUSE = 3
     saved_url = f"https://www.instagram.com/{username}/saved/all-posts/"
     driver.get(saved_url)
     time.sleep(5)
 
-    seen_profiles = set(load_seen_profiles())  # já processados
-    collected_usernames = []
+    seen_entries = load_seen_profiles()  # lista de dicts {username, post_url}
+    seen_posts = {entry["post_url"] for entry in seen_entries if "post_url" in entry}
+    seen_usernames = {entry["username"] for entry in seen_entries if "username" in entry}
+
+    collected_profiles = []
     scrolls = 0
     last_height = driver.execute_script("return document.body.scrollHeight")
 
-    # ====== FASE 1: COLETAR USERNAMES ======
-    while len(collected_usernames) < max_profiles and scrolls < scroll_limit:
+    while len(collected_profiles) < max_profiles and scrolls < scroll_limit:
         post_links = driver.find_elements(By.XPATH, '//a[contains(@href, "/p/")]')
         novos_encontrados = False
 
         for post in post_links:
-            if len(collected_usernames) >= max_profiles:
+            if len(collected_profiles) >= max_profiles:
                 break
             try:
+                post_url = post.get_attribute("href")
+
+                # pula se já vimos este post
+                if post_url in seen_posts:
+                    continue
+
+                # abre o modal
                 driver.execute_script("arguments[0].click();", post)
                 time.sleep(2)
 
-                # 🔑 Mantém sua lógica original
+                # pega username no modal
                 author_elem = WebDriverWait(driver, 6).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "article header a"))
                 )
                 profile_url = author_elem.get_attribute("href")
                 username_author = profile_url.strip("/").split("/")[-1]
 
-                if username_author not in seen_profiles and username_author not in collected_usernames:
-                    collected_usernames.append(username_author)
-                    seen_profiles.add(username_author)
+                # sempre salva o post_url no arquivo
+                seen_entries.append({"username": username_author, "post_url": post_url})
+                seen_posts.add(post_url)
+
+                # só coleta se for username inédito
+                if username_author not in seen_usernames:
+                    collected_profiles.append({
+                        "username": username_author,
+                        "post_url": post_url
+                    })
+                    seen_usernames.add(username_author)
                     novos_encontrados = True
-                    print(f"[✓] Novo perfil coletado: {username_author}")
+                    print(f"[✓] Novo perfil coletado: {username_author} ({post_url})")
 
                 close_post_modal(driver)
 
@@ -216,8 +254,8 @@ def scrape_saved_posts(driver, username, max_profiles=10, scroll_limit=50):
                 print(f"[!] Erro no post: {e}")
                 close_post_modal(driver)
 
-        # rola se não achou nada novo
-        if not novos_encontrados and len(collected_usernames) < max_profiles:
+        # rolar se não atingiu limite
+        if not novos_encontrados and len(collected_profiles) < max_profiles:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(SCROLL_PAUSE)
             new_height = driver.execute_script("return document.body.scrollHeight")
@@ -225,23 +263,13 @@ def scrape_saved_posts(driver, username, max_profiles=10, scroll_limit=50):
                 print("[!] Fim da página, sem mais posts.")
                 break
             last_height = new_height
-            scrolls += 1
-        else:
-            scrolls += 1
+        scrolls += 1
 
-    # ====== FASE 2: VISITAR PERFIS ======
-    profiles_data = []
-    for uname in collected_usernames:
-        try:
-            data = get_profile_data(driver, uname)
-            data["profile_url"] = f"https://www.instagram.com/{uname}/"
-            profiles_data.append(data)
-            print(f"[→] Dados extraídos de {uname}")
-        except Exception as e:
-            print(f"[!] Erro ao abrir perfil {uname}: {e}")
+    # salvar tudo (posts + usernames)
+    save_seen_profiles(seen_entries)
+    return collected_profiles
 
-    save_seen_profiles(list(seen_profiles))
-    return profiles_data
+
 
 
 
@@ -346,26 +374,26 @@ def scrape_instagram(request: ScrapeRequest):
     cookies = request.cookies
     max_profiles = request.max_profiles
 
+    driver = None
     try:
         driver = setup_driver(cookies)
         username = get_username(driver)
 
-        # coleta apenas perfis inéditos
+        # coleta apenas perfis inéditos abrindo apenas posts novos
         new_profiles = scrape_saved_posts(driver, username, max_profiles)
 
         profiles = []
         for profile in new_profiles:
-            data = get_profile_data(driver, profile["username"])
-            data["profile_url"] = profile["profile_url"]
-            profiles.append(data)
+            try:
+                data = get_profile_data(driver, profile["username"])
+                data["profile_url"] = f"https://www.instagram.com/{profile['username']}/"
+                data["post_url"] = profile["post_url"]  # mantém o link do post
+                profiles.append(data)
+                print(f"[+] Dados extraídos de {profile['username']}")
+            except Exception as e:
+                print(f"[!] Erro ao extrair dados de {profile['username']}: {e}")
 
         close_driver(driver)
-
-        # 🔹 salvar os novos perfis no arquivo global
-        seen = set(load_seen_profiles())
-        seen.update([p["username"] for p in new_profiles])
-        save_seen_profiles(list(seen))
-
         return {"profiles": profiles}
 
     except Exception as e:
@@ -374,5 +402,4 @@ def scrape_instagram(request: ScrapeRequest):
                 driver.quit()
             except:
                 pass
-        # 🔴 retorna erro 500 com a descrição
         raise HTTPException(status_code=500, detail=f"Erro durante scraping: {str(e)}")
