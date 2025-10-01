@@ -17,6 +17,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+import tempfile
+import shutil
 
 # =======================
 # CONFIGURAÇÕES GERAIS
@@ -96,41 +98,42 @@ def save_seen_profiles(profiles):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(profiles, f, ensure_ascii=False, indent=4)
 
-def setup_driver(cookies):
+def setup_driver(cookies: Cookies):
     chrome_options = Options()
-
-    # Headless (pode remover se quiser ver o navegador abrindo)
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--window-size=1920,1080")
-
-    # User-Agent realista
-    chrome_options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    )
-
-    # Evitar bloqueios comuns
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
 
-    # Profile persistente para cookies/cache
-    chrome_options.add_argument("--user-data-dir=/tmp/chrome-profile")
+    # 🔹 diretório temporário exclusivo para user-data
+    user_data_dir = tempfile.mkdtemp()
+    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
 
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
 
+    # anexa o path do user-data-dir dentro do driver
+    driver.user_data_dir = user_data_dir  
+
     driver.get("https://www.instagram.com/")
     time.sleep(3)
 
-    # Inserir cookies
     for k, v in cookies.dict().items():
         driver.add_cookie({"name": k, "value": v, "domain": ".instagram.com"})
 
     driver.refresh()
     time.sleep(5)
     return driver
+
+
+def close_driver(driver):
+    """Fecha o driver e remove o diretório temporário criado"""
+    try:
+        driver.quit()
+    finally:
+        if hasattr(driver, "user_data_dir") and os.path.exists(driver.user_data_dir):
+            shutil.rmtree(driver.user_data_dir, ignore_errors=True)
 
 def get_username(driver):
     elem = WebDriverWait(driver, 15).until(
@@ -143,69 +146,6 @@ def get_username(driver):
 
 
 
-
-# def scrape_saved_posts(driver, username, max_profiles=10, max_scrolls=30):
-#     """
-#     Abre os posts salvos, coleta perfis diretamente do modal do post.
-#     Retorna até max_profiles perfis únicos.
-#     """
-#     SCROLL_PAUSE = 2
-#     saved_url = f"https://www.instagram.com/{username}/saved/all-posts/"
-#     driver.get(saved_url)
-#     time.sleep(5)
-
-#     profiles = []
-#     seen = set()
-#     scrolls = 0
-
-#     while len(profiles) < max_profiles and scrolls < max_scrolls:
-#         post_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/p/'], a[href*='/reel/']")
-
-#         for i in range(len(post_elements)):
-#             if len(profiles) >= max_profiles:
-#                 break
-
-#             try:
-#                 post_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/p/'], a[href*='/reel/']")
-#                 post = post_elements[i]
-
-#                 driver.execute_script("arguments[0].scrollIntoView(true);", post)
-#                 time.sleep(1)
-#                 post.click()
-#                 time.sleep(3)
-
-#                 author_elem = WebDriverWait(driver, 6).until(
-#                     EC.presence_of_element_located((By.CSS_SELECTOR, "article header a"))
-#                 )
-#                 profile_url = author_elem.get_attribute("href")
-#                 username_author = profile_url.strip("/").split("/")[-1]
-
-#                 if username_author not in seen:
-#                     profiles.append({"username": username_author, "profile_url": profile_url})
-#                     seen.add(username_author)
-#                     print(f"[+] Extraído perfil: {username_author}")
-
-#                 # fechar modal
-#                 try:
-#                     close_btn = WebDriverWait(driver, 5).until(
-#                         EC.element_to_be_clickable((By.XPATH, "/html/body/div[last()]/div[1]/div/div[2]/div"))
-#                     )
-#                     close_btn.click()
-#                     time.sleep(2)
-#                 except:
-#                     from selenium.webdriver.common.keys import Keys
-#                     webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-#                     time.sleep(2)
-
-#             except Exception as e:
-#                 print(f"[!] Erro ao abrir post {i}: {e}")
-#                 continue
-
-#         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-#         time.sleep(SCROLL_PAUSE)
-#         scrolls += 1
-
-#     return profiles
 
 def scrape_saved_posts(driver, username, max_profiles=10, max_scrolls=50):
     """
@@ -390,7 +330,7 @@ def scrape_instagram(request: ScrapeRequest):
             data["profile_url"] = profile["profile_url"]
             profiles.append(data)
 
-        driver.quit()
+        close_driver(driver)
 
         # 🔹 salvar os novos perfis no arquivo global
         seen = set(load_seen_profiles())
